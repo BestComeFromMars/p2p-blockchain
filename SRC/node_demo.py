@@ -1,4 +1,4 @@
-# p2p_blockchain_gui.py
+# p2p_blockchain_gui.py / node_demo.py
 import socket
 import threading
 import json
@@ -67,6 +67,9 @@ class PeerNode:
         # {previous_hash: (best_timestamp, best_block_hash)}
         self.best_proposal_for_prev = {}
 
+        # Map hash → miner để hiển thị ở bảng blockchain
+        self.block_miner = {}
+
         # GUI
         self.build_gui()
         self.refresh_block_table()
@@ -82,6 +85,7 @@ class PeerNode:
         return f"{self.node_name.get()} @ {self.host_ip}:{self.port.get()}"
 
     def log(self, text):
+        """Ghi log ra khung bên phải (trắng trên nền đen)."""
         def _log():
             self.log_box.config(state="normal")
             self.log_box.insert(
@@ -119,13 +123,16 @@ class PeerNode:
 
     # ============= GUI =============
     def build_gui(self):
-        self.root.geometry("1200x700")
+        # cao hơn tí cho dễ nhìn phần blockchain
+        self.root.geometry("1200x800")
 
+        # ----- TOP: cấu hình node -----
         top = ttk.Frame(self.root, padding=10)
         top.pack(fill=tk.X)
 
+        # middle chỉ fill ngang, không expand hết chiều cao
         mid = ttk.Frame(self.root)
-        mid.pack(fill=tk.BOTH, expand=True)
+        mid.pack(fill=tk.X)
 
         left = ttk.LabelFrame(mid, text="Peers")
         left.pack(side=tk.LEFT, fill=tk.Y, padx=5)
@@ -136,8 +143,9 @@ class PeerNode:
         right = ttk.LabelFrame(mid, text="Logs thời gian thực")
         right.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
 
+        # bottom chiếm phần còn lại để hiển thị blockchain
         bottom = ttk.LabelFrame(self.root, text="Blockchain")
-        bottom.pack(fill=tk.BOTH, expand=True)
+        bottom.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
 
         # ----- TOP -----
         ttk.Label(top, text="Tên:").grid(row=0, column=0)
@@ -198,16 +206,43 @@ class PeerNode:
 
         # ----- RIGHT: log box -----
         self.log_box = tk.Text(
-            right, width=50, height=35, state="disabled", bg="black", fg="lime"
+            right,
+            width=50,
+            height=30,
+            state="disabled",
+            bg="#111111",
+            fg="white",
+            insertbackground="white",
+            wrap="word",
+            font=("Consolas", 10),
         )
         self.log_box.pack(fill=tk.BOTH, expand=True)
 
         # ----- BOTTOM: blockchain -----
-        cols = ("index", "time", "data", "prev", "hash")
+        # thêm cột MINER
+        cols = ("index", "time", "miner", "data", "prev", "hash")
         self.block_tree = ttk.Treeview(bottom, columns=cols, show="headings")
-        for c in cols:
-            self.block_tree.heading(c, text=c.upper())
+
+        self.block_tree.heading("index", text="INDEX")
+        self.block_tree.heading("time", text="TIME")
+        self.block_tree.heading("miner", text="MINER")
+        self.block_tree.heading("data", text="DATA")
+        self.block_tree.heading("prev", text="PREV")
+        self.block_tree.heading("hash", text="HASH")
+
+        # set width mặc định, cột DATA sẽ auto chỉnh trong refresh_block_table
+        self.block_tree.column("index", width=60, anchor="center")
+        self.block_tree.column("time", width=80, anchor="center")
+        self.block_tree.column("miner", width=220, anchor="w")
+        self.block_tree.column("data", width=300, anchor="w")
+        self.block_tree.column("prev", width=160, anchor="w")
+        self.block_tree.column("hash", width=180, anchor="w")
+
         self.block_tree.pack(fill=tk.BOTH, expand=True)
+
+        # tăng rowheight để text nhìn thoáng hơn
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=28)
 
     # ============= Network =============
     def start_node(self):
@@ -479,7 +514,12 @@ class PeerNode:
         self.mine_block()
 
     def mine_block(self):
-        data = json.dumps(self.pending_tx, ensure_ascii=False)
+        # Gói payload gồm: tx + miner để hiển thị ở blockchain
+        payload = {
+            "tx": self.pending_tx,
+            "miner": self.get_self_display(),
+        }
+        data = json.dumps(payload, ensure_ascii=False)
 
         last_block = self.blockchain.chains[-1] if self.blockchain.chains else None
         index = len(self.blockchain.chains)
@@ -500,7 +540,12 @@ class PeerNode:
             self.global_mining = False
             self.is_mining = False
 
-        self.log(f"✅ Đào xong block #{block.index} → {block.hash[:10]}...")
+        self.block_miner[block.hash] = self.get_self_display()
+
+        self.log(
+            f"✅ Đào xong block #{block.index} bởi {self.get_self_display()} "
+            f"→ hash={block.hash[:12]}..."
+        )
 
         proposal = {
             "type": "BLOCK_PROPOSAL",
@@ -520,6 +565,7 @@ class PeerNode:
         bh = msg["block_hash"]
 
         block = Block.from_dict(block_dict)
+        self.block_miner[bh] = miner
 
         with self.mining_lock:
             self.global_mining = False
@@ -527,7 +573,8 @@ class PeerNode:
             self.pending_tx = None
 
         self.log(
-            f"Nhận BLOCK_PROPOSAL từ {miner}, hash={bh[:10]}..., dừng đào để xác thực."
+            f"Nhận BLOCK_PROPOSAL: block #{block.index} do {miner} đào, "
+            f"hash={bh[:12]}..., dừng đào để xác thực."
         )
 
         prev = getattr(block, "previous_hash", None)
@@ -566,8 +613,15 @@ class PeerNode:
         if self.current_block_hash != bh or self.current_proposed_block is None:
             return
 
+        block = self.current_proposed_block
+        miner_name = self.block_miner.get(bh, self.get_self_display())
+        short_hash = bh[:12]
+
         if not accept:
-            self.log(f"{voter_name} vote NO → hủy block {bh[:10]}...")
+            self.log(
+                f"{voter_name} vote NO cho block #{block.index} "
+                f"(miner={miner_name}, hash={short_hash}...) → huỷ round."
+            )
             self.block_has_no.add(bh)
             self.reset_round_state()
             return
@@ -575,8 +629,12 @@ class PeerNode:
         votes = self.block_votes.setdefault(bh, set())
         if voter_id not in votes:
             votes.add(voter_id)
+
+            total_nodes = len(self.peers) + 1
             self.log(
-                f"{voter_name} vote YES cho block {bh[:10]}..., tổng YES hiện tại: {len(votes)}"
+                f"{voter_name} vote YES cho block #{block.index} "
+                f"(miner={miner_name}, hash={short_hash}...). "
+                f"YES hiện tại: {len(votes)}/{total_nodes}"
             )
 
         total_nodes = len(self.peers) + 1
@@ -597,13 +655,18 @@ class PeerNode:
 
         self.blockchain.appendBlock(block)
         self.refresh_block_table()
+
+        miner_name = self.block_miner.get(bh, self.get_self_display())
         self.status.set("Block đã được toàn mạng chấp thuận")
-        self.log("Block được toàn mạng YES → commit & broadcast BLOCK_COMMIT.")
+        self.log(
+            f"✅ Block #{block.index} (miner={miner_name}, "
+            f"hash={bh[:12]}...) được toàn mạng YES → commit & broadcast BLOCK_COMMIT."
+        )
 
         commit_msg = {
             "type": "BLOCK_COMMIT",
             "block": block.to_dict(),
-            "miner": self.get_self_display(),
+            "miner": miner_name,
             "block_hash": bh,
         }
         self.broadcast(commit_msg)
@@ -616,6 +679,7 @@ class PeerNode:
         bh = msg["block_hash"]
 
         block = Block.from_dict(block_dict)
+        self.block_miner[bh] = miner
 
         if not self.validate_block_pow(block):
             self.log("Nhận BLOCK_COMMIT nhưng block không hợp lệ → bỏ qua.")
@@ -635,7 +699,10 @@ class PeerNode:
         self.reset_round_state()
         self.refresh_block_table()
         self.status.set(f"Block của {miner} đã được commit.")
-        self.log(f"Block của {miner} đã được commit và thêm vào chain.")
+        self.log(
+            f"✅ BLOCK_COMMIT: thêm block #{block.index} của {miner}, "
+            f"hash={bh[:12]}... vào chain."
+        )
 
     # ============= SYNC =============
     def periodic_sync_loop(self):
@@ -658,20 +725,53 @@ class PeerNode:
                 print(f"[SYNC] Lỗi sync với {name} @ {ip}:{port}: {e}\n")
 
     def refresh_block_table(self):
+        """Cập nhật bảng blockchain: có thêm cột miner, data tự giãn rộng theo độ dài tx."""
         for row in self.block_tree.get_children():
             self.block_tree.delete(row)
+
+        max_data_len = 0
+
         for b in self.blockchain.chains:
+            miner_name = self.block_miner.get(b.hash, "")
+
+            # cố gắng parse payload để lấy miner + tx đẹp hơn
+            display_data = str(b.data)
+            try:
+                payload = json.loads(b.data)
+                if isinstance(payload, dict):
+                    miner_name = payload.get("miner", miner_name)
+                    tx = payload.get("tx", None)
+                    if isinstance(tx, dict):
+                        # chỉ show from/to/amount cho gọn
+                        frm = tx.get("from", "") or ""
+                        to = tx.get("to", "") or ""
+                        amt = tx.get("amount", "")
+                        msg = tx.get("message", "")
+                        display_data = f"{frm} -> {to} | {amt}$ | {msg}"
+                    else:
+                        display_data = str(tx)
+            except Exception:
+                pass
+
+            max_data_len = max(max_data_len, len(display_data))
+
             self.block_tree.insert(
                 "",
                 tk.END,
                 values=(
                     b.index,
                     time.strftime("%H:%M:%S", time.localtime(b.timestamp)),
-                    str(b.data)[:40],
+                    miner_name,
+                    display_data,
                     getattr(b, "previous_hash", None),
                     str(b.hash)[:20],
                 ),
             )
+
+        # điều chỉnh width cột DATA theo độ dài tx (giới hạn 600px)
+        if max_data_len > 0:
+            width = min(600, max_data_len * 7)  # ước lượng 7px / ký tự
+            self.block_tree.column("data", width=width)
 
 
 if __name__ == "__main__":
