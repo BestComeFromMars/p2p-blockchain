@@ -13,15 +13,8 @@ from blockchain import Blockchain
 DIFFICULTY_PREFIX_ZERO = 3   # số lượng '0' đầu hash yêu cầu
 
 # ================== CẤU HÌNH THEO MÁY ==================
-# 👉 Trên MAC của bạn:
-#    - MY_ZERO_TIER_IP = IP ZeroTier của MAC (10.125.45.183)
-#    - BOOTSTRAP_ZERO_TIER_IP = IP ZeroTier của WINDOWS gốc (10.125.45.249)
-#
-# 👉 Trên máy WINDOWS gốc:
-#    - MY_ZERO_TIER_IP = IP ZeroTier của chính nó (10.125.45.249)
-#    - BOOTSTRAP_ZERO_TIER_IP = 10.125.45.249  (tự làm bootstrap)
-MY_ZERO_TIER_IP = "10.125.45.183"          # IP ZeroTier của MAC
-BOOTSTRAP_ZERO_TIER_IP = "10.125.45.249"   # IP ZeroTier WINDOWS gốc
+MY_ZERO_TIER_IP = "10.125.45.212"
+BOOTSTRAP_ZERO_TIER_IP = "10.125.45.249"
 
 
 class PeerNode:
@@ -70,6 +63,11 @@ class PeerNode:
         # Map hash → miner để hiển thị ở bảng blockchain
         self.block_miner = {}
 
+        # Bitcoin
+        self.btc = 0
+        self.checked_pending_tx = None
+        self.btc_var = tk.StringVar(value="0 BTC")
+
         # GUI
         self.build_gui()
         self.refresh_block_table()
@@ -83,6 +81,12 @@ class PeerNode:
 
     def get_self_display(self):
         return f"{self.node_name.get()} @ {self.host_ip}:{self.port.get()}"
+
+    def reward(self, length):
+        """Thưởng BTC theo độ dài message."""
+        self.btc += length
+        self.btc_var.set(f"{self.btc} BTC")
+        self.log(f"🎁 Thưởng {length} BTC cho miner này (tổng: {self.btc} BTC)")
 
     def log(self, text):
         """Ghi log ra khung bên phải (trắng trên nền đen)."""
@@ -98,6 +102,7 @@ class PeerNode:
 
     def reset_round_state(self):
         self.pending_tx = None
+        self.checked_pending_tx = None
         self.global_mining = False
         self.is_mining = False
         self.current_proposed_block = None
@@ -159,6 +164,10 @@ class PeerNode:
 
         self.start_btn = ttk.Button(top, text="Start Node", command=self.start_node)
         self.start_btn.grid(row=0, column=6, padx=5)
+
+        # Hiển thị BTC
+        ttk.Label(top, text="BTC:", foreground="orange").grid(row=0, column=7, padx=(15, 0))
+        ttk.Label(top, textvariable=self.btc_var, foreground="orange").grid(row=0, column=8, sticky="w")
 
         ttk.Label(top, text="Bootstrap IP:").grid(row=1, column=0)
         ttk.Entry(top, textvariable=self.bootstrap_ip, width=15).grid(row=1, column=1)
@@ -497,6 +506,8 @@ class PeerNode:
             if self.pending_tx is not None or self.global_mining:
                 return
             self.pending_tx = tx
+            # Lưu tx gốc để tính thưởng sau này (nếu mình là miner thắng)
+            self.checked_pending_tx = tx
             self.global_mining = True
 
         self.log("TX mới, quá trình bắt đầu sau 5s...")
@@ -571,6 +582,8 @@ class PeerNode:
             self.global_mining = False
             self.is_mining = False
             self.pending_tx = None
+            # mình đã thua cuộc, không dùng checked_pending_tx nữa
+            self.checked_pending_tx = None
 
         self.log(
             f"Nhận BLOCK_PROPOSAL: block #{block.index} do {miner} đào, "
@@ -642,6 +655,7 @@ class PeerNode:
             self._commit_current_block()
 
     def _commit_current_block(self):
+        """Được gọi CHỈ ở node đã đào ra block thắng."""
         if self.current_proposed_block is None or self.current_block_hash is None:
             return
 
@@ -658,6 +672,13 @@ class PeerNode:
 
         miner_name = self.block_miner.get(bh, self.get_self_display())
         self.status.set("Block đã được toàn mạng chấp thuận")
+
+        # ⭐ THƯỞNG BTC: chỉ node đào nhanh nhất và được mạng chấp nhận
+        if miner_name == self.get_self_display() and self.checked_pending_tx is not None:
+            msg_text = str(self.checked_pending_tx.get("message", ""))
+            reward_len = len(msg_text)
+            self.reward(reward_len)
+
         self.log(
             f"✅ Block #{block.index} (miner={miner_name}, "
             f"hash={bh[:12]}...) được toàn mạng YES → commit & broadcast BLOCK_COMMIT."
@@ -674,6 +695,7 @@ class PeerNode:
         self.reset_round_state()
 
     def handle_block_commit(self, msg):
+        """Các node KHÁC chỉ nhận block, không nhận thưởng."""
         block_dict = msg["block"]
         miner = msg["miner"]
         bh = msg["block_hash"]
