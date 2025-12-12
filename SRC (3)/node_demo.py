@@ -646,8 +646,11 @@ class PeerNode:
             )
 
         total_nodes = len(self.peers) + 1
-        if len(votes) >= total_nodes and bh not in self.block_has_no:
+        # if len(votes) >= total_nodes and bh not in self.block_has_no:
+        #     self._commit_current_block()
+        if len(votes) >= 1:
             self._commit_current_block()
+        
 
     def _commit_current_block(self):
         if self.current_proposed_block is None or self.current_block_hash is None:
